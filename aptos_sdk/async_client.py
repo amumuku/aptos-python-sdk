@@ -24,7 +24,7 @@ from .transactions import (
     TransactionPayload,
 )
 from .type_tag import StructTag, TypeTag
-
+import json
 U64_MAX = 18446744073709551615
 
 
@@ -143,41 +143,62 @@ class RestClient:
 
     async def get_fungible_asset_balance(
         self,
-        account_address: str,
-        coin_type: str,
+        account_address: AccountAddress,
+        token_address: AccountAddress,
         ledger_version: Optional[int] = None,
     ) -> float:
         """
-        Fetch the balance of a fungible asset (e.g., USDA) for an account on a Move-based blockchain.
+        查询 Aptos 区块链上指定账户的可互换资产余额。
 
-        :param account_address: Address of the account, with or without a '0x' prefix.
-        :param coin_type: Metadata address of the fungible asset (e.g., USDA's Metadata address).
-        :param ledger_version: Ledger version to query the state. If None, uses the latest version.
-        :return: The balance of the fungible asset in human-readable units (adjusted for decimals).
+        :param account_address: 账户地址（Aptos AccountAddress 类型，0x 开头 32 字节地址）。
+        :param token_address: 可互换资产的元数据地址（AccountAddress 类型）。
+        :param ledger_version: 查询的账本版本，默认为最新。
+        :return: 调整小数位后的余额（float）。
+        :raises ValueError: 输入或响应数据无效。
+        :raises AptosApiError: 区块链 API 查询失败。
         """
-        # Normalize account address
-        account_address = AccountAddress.from_str(account_address)
+        try:
+            # 输入验证
+            if not isinstance(account_address, AccountAddress) or not isinstance(token_address, AccountAddress):
+                raise ValueError("账户或资产地址必须是 AccountAddress 类型")
 
-        # Query the balance using primary_fungible_store::balance
-        result = await self.view_bcs_payload(
-            module="0x1::primary_fungible_store",
-            func="balance",
-            type_args=[TypeTag(StructTag.from_str("0x1::fungible_asset::Metadata"))],
-            args=[
-                TransactionArgument(account_address, Serializer.struct),  # Account address
-                TransactionArgument(AccountAddress.from_str(coin_type), Serializer.struct),  # Metadata address
-            ],
-            ledger_version=ledger_version,
-        )
+            # 准备视图调用参数
+            view_kwargs = {"ledger_version": ledger_version} if ledger_version is not None else {}
 
-        # Get raw balance (integer)
-        raw_balance = int(result[0])
+            # 查询小数位
+            decimals_response = await self.view(
+                function="0x1::fungible_asset::decimals",
+                type_arguments=["0x1::fungible_asset::Metadata"],
+                arguments=[str(token_address)],
+                **view_kwargs
+            )
+            decimals_result = json.loads(decimals_response)
+            if not isinstance(decimals_result, list) or len(decimals_result) == 0:
+                raise ValueError("小数位响应无效")
+            decimals = int(decimals_result[0])
 
-        # Adjust for decimals (USDA has 8 decimals based on provided metadata)
-        decimals = 8  # USDA's decimals, adjust if querying other tokens
-        balance = raw_balance / (10 ** decimals)
+            # 查询余额
+            balance_response = await self.view(
+                function="0x1::primary_fungible_store::balance",
+                type_arguments=["0x1::fungible_asset::Metadata"],
+                arguments=[str(account_address), str(token_address)],
+                **view_kwargs
+            )
+            balance_result = json.loads(balance_response)
+            if not isinstance(balance_result, list) or len(balance_result) == 0:
+                raise ValueError("余额响应无效")
+            raw_balance = int(balance_result[0])
 
-        return balance
+            # 调整余额
+            return raw_balance / (10 ** decimals)
+
+        except ValueError as e:
+            raise ValueError(f"查询账户 {account_address} 的资产 {token_address} 余额失败：{str(e)}")
+        
+        except json.JSONDecodeError as e:
+            raise ValueError(f"解析视图响应失败：账户 {account_address}，资产 {token_address}：{str(e)}")
+        except Exception as e:
+            raise RuntimeError(f"意外错误：账户 {account_address}，资产 {token_address}：{str(e)}")
 
     async def account_balance(
         self,

@@ -116,6 +116,69 @@ class RestClient:
             raise ApiError(f"{response.text} - {account_address}", response.status_code)
         return response.json()
 
+    async def new_account_balance(
+            self,
+            account_address: AccountAddress,
+            ledger_version: Optional[int] = None,
+            coin_type: Optional[str] = None,
+        ) -> int:
+            """
+            Fetch the fungible asset balance associated with the account.
+
+            :param account_address: Address of the account, with or without a '0x' prefix.
+            :param ledger_version: Ledger version to get state of account. If not provided, it will be the latest version.
+            :param coin_type: Metadata address of the fungible asset (e.g., USDA's metadata address).
+            :return: The balance of the fungible asset associated with the account.
+            """
+            coin_type = coin_type or "0x48b904a97eafd065ced05168ec44638a63e1e3bcaec49699f6b8dabbd1424650"  # USDA 的 Metadata 地址
+            result = await self.view_bcs_payload(
+                "0x1::primary_fungible_store",  # 使用 fungible_asset 模块
+                "balance",
+                [TypeTag(StructTag.from_str("0x1::fungible_asset::Metadata"))],  # Metadata 类型
+                [TransactionArgument(account_address, Serializer.struct), TransactionArgument(coin_type, Serializer.struct)],
+                ledger_version,
+            )
+            return int(result[0])
+    
+
+    async def get_fungible_asset_balance(
+        self,
+        account_address: str,
+        coin_type: str,
+        ledger_version: Optional[int] = None,
+    ) -> float:
+        """
+        Fetch the balance of a fungible asset (e.g., USDA) for an account on a Move-based blockchain.
+
+        :param account_address: Address of the account, with or without a '0x' prefix.
+        :param coin_type: Metadata address of the fungible asset (e.g., USDA's Metadata address).
+        :param ledger_version: Ledger version to query the state. If None, uses the latest version.
+        :return: The balance of the fungible asset in human-readable units (adjusted for decimals).
+        """
+        # Normalize account address
+        account_address = AccountAddress.from_str(account_address)
+
+        # Query the balance using primary_fungible_store::balance
+        result = await self.view_bcs_payload(
+            module="0x1::primary_fungible_store",
+            func="balance",
+            type_args=[TypeTag(StructTag.from_str("0x1::fungible_asset::Metadata"))],
+            args=[
+                TransactionArgument(account_address, Serializer.struct),  # Account address
+                TransactionArgument(AccountAddress.from_str(coin_type), Serializer.struct),  # Metadata address
+            ],
+            ledger_version=ledger_version,
+        )
+
+        # Get raw balance (integer)
+        raw_balance = int(result[0])
+
+        # Adjust for decimals (USDA has 8 decimals based on provided metadata)
+        decimals = 8  # USDA's decimals, adjust if querying other tokens
+        balance = raw_balance / (10 ** decimals)
+
+        return balance
+
     async def account_balance(
         self,
         account_address: AccountAddress,
@@ -749,6 +812,35 @@ class RestClient:
             sender, TransactionPayload(payload), sequence_number=sequence_number
         )
         return await self.submit_bcs_transaction(signed_transaction)  # <:!:bcs_transfer
+
+    async def transfer_move_coins(
+            self,
+            sender: Account,
+            recipient: AccountAddress,
+            token_addr: str,
+            amount: int,
+            sequence_number: Optional[int] = None,
+        ) -> str:
+           
+             # 构造函数参数
+            transaction_arguments = [
+                TransactionArgument(AccountAddress.from_str(token_addr), Serializer.struct),
+                TransactionArgument(recipient,Serializer.struct),
+                TransactionArgument(amount, Serializer.u64)
+            ]
+
+            payload=EntryFunction.natural(
+                    "0x1::primary_fungible_store",
+                    "transfer",
+                    [TypeTag(StructTag.from_str("0x1::fungible_asset::Metadata"))],
+                    transaction_arguments
+                )
+
+            signed_transaction = await self.create_bcs_signed_transaction(
+                sender, TransactionPayload(payload), sequence_number=sequence_number
+            )
+            return await self.submit_bcs_transaction(signed_transaction)
+
 
     async def transfer_coins(
         self,
